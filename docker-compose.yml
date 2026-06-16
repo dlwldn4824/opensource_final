@@ -1,0 +1,18 @@
+services:
+  back:
+    build: ./back
+    container_name: recommend-mix-back
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  front:
+    build: ./front
+    container_name: recommend-mix-front
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://back:8000/recommend
+    depends_on:
+      - back
+    restart: unless-stopped
