@@ -30,6 +30,58 @@ API_URL = _default_api_url()
 API_BASE = API_URL.rsplit("/", 1)[0]
 
 
+def _esc(value: object) -> str:
+    """None·숫자 등도 안전하게 HTML 이스케이프."""
+    if value is None:
+        return ""
+    return html.escape(str(value))
+
+
+def _render_html(fragment: str) -> None:
+    """st.markdown은 여러 줄 HTML을 깨뜨리므로 줄바꿈만 제거해 렌더."""
+    st.markdown(fragment.replace("\n", "").replace("\r", ""), unsafe_allow_html=True)
+
+
+MIX_LABELS = {
+    "vocal_eq": "보컬 EQ",
+    "instrument_balance": "악기 밸런스",
+    "reverb_delay": "리버브/딜레이",
+    "compressor_limiter": "컴프/리미터",
+    "mastering_tip": "마스터링",
+}
+
+
+def _build_song_card(idx: int, song: dict) -> str:
+    mixing = song.get("mixing_direction") or {}
+    simplified = song.get("simplified_arrangement_possible", False)
+    simplified_tag = '<span class="tag">간소화 편곡 가능</span>' if simplified else ""
+    mix_items = "".join(
+        f'<div class="mix-item"><strong>{label}</strong>{_esc(mixing.get(key, ""))}</div>'
+        for key, label in MIX_LABELS.items()
+    )
+    return (
+        f'<div class="song-card">'
+        f'<div class="song-rank">#{idx}</div>'
+        f'<div class="song-title">{_esc(song.get("title", ""))}</div>'
+        f'<div class="song-artist">{_esc(song.get("artist", ""))}</div>'
+        f'<div class="score-badge">MATCH SCORE {song.get("score", 0)}</div>'
+        f'<div class="tag-row">'
+        f'<span class="tag">난이도 {_esc(song.get("difficulty", ""))}</span>'
+        f'<span class="tag">{_esc(song.get("vocal_range", ""))}</span>'
+        f'{simplified_tag}'
+        f'</div>'
+        f'<div class="section-label">Session</div>'
+        f'<p class="section-text">{_esc(song.get("session_description", ""))}</p>'
+        f'<div class="section-label">Why This Song?</div>'
+        f'<p class="section-text">{_esc(song.get("reason", ""))}</p>'
+        f'<div class="section-label">Arrangement Tip</div>'
+        f'<p class="section-text">{_esc(song.get("arrangement_tip", ""))}</p>'
+        f'<div class="section-label">Mixing Direction</div>'
+        f'<div class="mix-grid">{mix_items}</div>'
+        f'</div>'
+    )
+
+
 def _check_api_ready() -> tuple[bool, str]:
     try:
         res = requests.get(f"{API_BASE}/health", timeout=5)
@@ -452,7 +504,7 @@ if submitted:
 
     with st.spinner("세트리스트를 구성하는 중..."):
         try:
-            response = requests.post(API_URL, json=payload, timeout=20)
+            response = requests.post(API_URL, json=payload, timeout=60)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.ConnectionError:
@@ -483,57 +535,38 @@ if submitted:
             except ValueError:
                 st.code(response.text)
             st.stop()
+        except requests.exceptions.Timeout:
+            st.error(
+                "추천 요청이 시간 초과되었습니다. EC2·로컬 서버가 느릴 때 발생할 수 있습니다. "
+                "잠시 후 다시 시도하거나 백엔드를 재시작해 주세요."
+            )
+            st.stop()
         except requests.exceptions.RequestException as exc:
             st.error(f"요청 중 오류: {exc}")
             st.stop()
 
-    summary = html.escape(data.get("summary", ""))
-    st.markdown(f'<div class="summary-bar"><strong>{html.escape(data.get("title", ""))}</strong><br>{summary}</div>', unsafe_allow_html=True)
+    recommendations = data.get("recommendations") or []
+    if not recommendations:
+        st.warning(
+            "조건에 맞는 추천 곡을 찾지 못했습니다. 세션 수·악기·음역대를 바꿔 다시 시도해 보세요."
+        )
+        st.stop()
 
-    for idx, song in enumerate(data.get("recommendations", []), start=1):
-        mixing = song.get("mixing_direction", {})
-        simplified = song.get("simplified_arrangement_possible", False)
-        simplified_tag = '<span class="tag">간소화 편곡 가능</span>' if simplified else ""
+    summary = _esc(data.get("summary", ""))
+    _render_html(
+        f'<div class="summary-bar"><strong>{_esc(data.get("title", ""))}</strong><br>{summary}</div>'
+    )
 
-        mix_items = ""
-        mix_labels = {
-            "vocal_eq": "보컬 EQ",
-            "instrument_balance": "악기 밸런스",
-            "reverb_delay": "리버브/딜레이",
-            "compressor_limiter": "컴프/리미터",
-            "mastering_tip": "마스터링",
-        }
-        for key, label in mix_labels.items():
-            val = html.escape(mixing.get(key, ""))
-            mix_items += f'<div class="mix-item"><strong>{label}</strong>{val}</div>'
+    for idx, song in enumerate(recommendations, start=1):
+        try:
+            _render_html(_build_song_card(idx, song))
+        except Exception as exc:
+            st.error(f"#{idx}번 곡 카드 표시 중 오류: {exc}")
 
-        card_html = f"""
-        <div class="song-card">
-            <div class="song-rank">#{idx}</div>
-            <div class="song-title">{html.escape(song.get("title", ""))}</div>
-            <div class="song-artist">{html.escape(song.get("artist", ""))}</div>
-            <div class="score-badge">MATCH SCORE {song.get("score", 0)}</div>
-            <div class="tag-row">
-                <span class="tag">난이도 {html.escape(song.get("difficulty", ""))}</span>
-                <span class="tag">{html.escape(song.get("vocal_range", ""))}</span>
-                {simplified_tag}
-            </div>
-            <div class="section-label">Session</div>
-            <p class="section-text">{html.escape(song.get("session_description", ""))}</p>
-            <div class="section-label">Why This Song?</div>
-            <p class="section-text">{html.escape(song.get("reason", ""))}</p>
-            <div class="section-label">Arrangement Tip</div>
-            <p class="section-text">{html.escape(song.get("arrangement_tip", ""))}</p>
-            <div class="section-label">Mixing Direction</div>
-            <div class="mix-grid">{mix_items}</div>
-        </div>
-        """
-        st.markdown(card_html, unsafe_allow_html=True)
-
-    cautions = data.get("caution", [])
+    cautions = data.get("caution") or []
     if cautions:
-        caution_html = "".join(f"<p class='section-text'>{html.escape(c)}</p>" for c in cautions)
-        st.markdown(f'<div class="caution-card">{caution_html}</div>', unsafe_allow_html=True)
+        caution_html = "".join(f"<p class='section-text'>{_esc(c)}</p>" for c in cautions if c)
+        _render_html(f'<div class="caution-card">{caution_html}</div>')
 
 with st.expander("사용 방법"):
     st.markdown(

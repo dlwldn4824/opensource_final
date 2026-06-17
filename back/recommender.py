@@ -113,18 +113,20 @@ def _score_mood(user_mood: str, song_moods: list[str]) -> tuple[float, str | Non
     return 0.0, None
 
 
-def _score_session(user_count: int, song: dict[str, Any]) -> tuple[float, bool, str | None]:
-    required = song["session_count"]
+def _score_session(user_count: int, session_label: str, song: dict[str, Any]) -> tuple[float, bool, str | None]:
+    required = song.get("session_count", 4)
+    if not isinstance(required, int):
+        required = 4
     simplified = song.get("simplified_arrangement", False)
 
     if user_count >= required:
         bonus = min(15.0, (user_count - required + 1) * 3)
-        return 15.0 + bonus, False, f"세션 {user_count}명으로 구성 가능"
+        return 15.0 + bonus, False, f"세션 {session_label}으로 구성 가능"
 
     if simplified and user_count >= max(2, required - 2):
-        return 8.0, True, f"세션 {user_count}명 → 간소화 편곡 가능"
+        return 8.0, True, f"세션 {session_label} → 간소화 편곡 가능"
     if simplified:
-        return 4.0, True, f"세션 부족 → 간소화 편곡 검토 필요"
+        return 4.0, True, f"세션 {session_label} → 간소화 편곡 검토 필요"
     return -5.0, False, None
 
 
@@ -172,7 +174,7 @@ def score_song(
         reasons.append(m_reason)
 
     user_count = _user_session_count(session_count_label)
-    s_pts, simplified, s_reason = _score_session(user_count, song)
+    s_pts, simplified, s_reason = _score_session(user_count, session_count_label, song)
     score += s_pts
     if s_reason:
         reasons.append(s_reason)
@@ -200,14 +202,20 @@ def score_song(
     )
 
 
+def _safe_str(value: object, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
 def build_mixing_direction(song: dict[str, Any]) -> dict[str, str]:
-    tip = song.get("mixing_tip", {})
+    tip = song.get("mixing_tip") or {}
     return {
-        "vocal_eq": tip.get("vocal", "보컬 2~5kHz presence 조정"),
-        "instrument_balance": tip.get("instrument", "악기 mid-range 정리"),
-        "reverb_delay": tip.get("space", "곡 분위기에 맞는 reverb/delay"),
-        "compressor_limiter": tip.get("compressor_limiter", "보컬 comp 3:1, light bus comp"),
-        "mastering_tip": tip.get("master", "자연스러운 다이내믹 유지, ceiling -1.0 dBTP"),
+        "vocal_eq": _safe_str(tip.get("vocal"), "보컬 2~5kHz presence 조정"),
+        "instrument_balance": _safe_str(tip.get("instrument"), "악기 mid-range 정리"),
+        "reverb_delay": _safe_str(tip.get("space"), "곡 분위기에 맞는 reverb/delay"),
+        "compressor_limiter": _safe_str(tip.get("compressor_limiter"), "보컬 comp 3:1, light bus comp"),
+        "mastering_tip": _safe_str(tip.get("master"), "자연스러운 다이내믹 유지, ceiling -1.0 dBTP"),
     }
 
 
@@ -218,22 +226,25 @@ def build_recommendation_item(scored: ScoredSong) -> dict[str, Any]:
         reason += " · 간소화 편곡 가능"
 
     return {
-        "title": song["title"],
-        "artist": song["artist"],
+        "title": _safe_str(song.get("title"), "제목 없음"),
+        "artist": _safe_str(song.get("artist"), "아티스트 미상"),
         "score": scored.score,
         "reason": reason,
-        "difficulty": DIFFICULTY_KO.get(song["difficulty"], song["difficulty"]),
-        "vocal_range": RANGE_KO.get(song["vocal_range"], song["vocal_range"]),
-        "session_description": song["session_description"],
-        "required_sessions": song["required_sessions"],
+        "difficulty": DIFFICULTY_KO.get(song.get("difficulty", ""), _safe_str(song.get("difficulty"), "보통")),
+        "vocal_range": RANGE_KO.get(song.get("vocal_range", ""), _safe_str(song.get("vocal_range"), "")),
+        "session_description": _safe_str(song.get("session_description"), ""),
+        "required_sessions": song.get("required_sessions") or [],
         "simplified_arrangement_possible": scored.simplified_possible,
-        "arrangement_tip": song["arrangement_tip"],
+        "arrangement_tip": _safe_str(song.get("arrangement_tip"), ""),
         "mixing_direction": build_mixing_direction(song),
     }
 
 
 def _select_top_songs(scored_list: list[ScoredSong], vocal_range: str, top_n: int) -> list[ScoredSong]:
-    """음역대 정확 일치 곡을 우선 추천하고, 부족할 때만 인접 음역으로 보충."""
+    """음역대 정확 일치 곡을 우선 추천하고, 부족할 때 인접·전체 점수 순으로 보충."""
+    if not scored_list:
+        return []
+
     mapped = RANGE_MAP[vocal_range]
     adjacent_ranges = set(IMMEDIATE_ADJACENT.get(mapped, []))
 
@@ -245,15 +256,28 @@ def _select_top_songs(scored_list: list[ScoredSong], vocal_range: str, top_n: in
     if len(exact) >= top_n:
         return exact[:top_n]
 
+    exact_titles = {s.song["title"] for s in exact}
     adjacent = sorted(
         [
             s for s in scored_list
-            if not s.exact_range_match and s.song["vocal_range"] in adjacent_ranges
+            if not s.exact_range_match
+            and s.song.get("vocal_range") in adjacent_ranges
+            and s.song["title"] not in exact_titles
         ],
         key=lambda x: x.score,
         reverse=True,
     )
-    combined = exact + [s for s in adjacent if s.song["title"] not in {e.song["title"] for e in exact}]
+    combined = exact + adjacent
+
+    if len(combined) < top_n:
+        seen = {s.song["title"] for s in combined}
+        rest = sorted(
+            [s for s in scored_list if s.song["title"] not in seen],
+            key=lambda x: x.score,
+            reverse=True,
+        )
+        combined.extend(rest)
+
     return combined[:top_n]
 
 
